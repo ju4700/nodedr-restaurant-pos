@@ -35,6 +35,7 @@ Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 </p>
 
 
+[Install](#install-orderrestro) ·
 [Quick Start](#quick-start) ·
 [How to use](#how-to-use-orderrestro) ·
 [Full tutorial](./TUTORIAL.md) ·
@@ -47,6 +48,21 @@ Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 </div>
 
 ---
+
+## Install OrderRestro
+
+Pick the one that fits. The server (back office, tills, kitchen display) runs on a PC, mini PC, NAS or VPS; the phone app connects to it or works offline on its own.
+
+| Where | Install |
+| --- | --- |
+| **Android phone / tablet** | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.nodedr.orderrestro&pcampaignid=web_share) (package `com.nodedr.orderrestro`) |
+| **Ubuntu / Debian server** (amd64, arm64) | `curl -fsSL https://orderrestro.nodedr.com/install-linux.sh \| sudo bash`, then open `http://<server>:1995` |
+| **Any Linux / macOS / WSL2 with Docker** | `git clone https://github.com/Raktim94/nodedr-restaurant-pos.git && cd nodedr-restaurant-pos && ./install.sh` |
+| **CasaOS / ZimaOS** | App Store, then **Install a customized app**, and paste `https://raw.githubusercontent.com/Raktim94/nodedr-restaurant-pos/master/casaos/docker-compose.yml` ([steps](casaos/README.md)) |
+| **Windows 10/11** | [Get it from the Microsoft Store](https://apps.microsoft.com/detail/9NRG9BVFCMN5), or run `winget install --id 9NRG9BVFCMN5 --source msstore` in PowerShell ([build notes](windows/msix/README.md)) |
+| **Downloads and checksums** | [Latest release](https://github.com/Raktim94/nodedr-restaurant-pos/releases/latest) (`.deb` for amd64 and arm64, with `.sha256` files) |
+
+After the server is up, open it in a browser and create your restaurant at `/signup`. Details, Docker setup and manual install are in [Quick start](#quick-start).
 
 ## Integrate with AI Coding Agents
 
@@ -194,6 +210,21 @@ roles) under **Settings** in the sidebar, photo upload on menu items, and
 an English/Spanish/French language switcher on the guest-facing QR
 ordering page and staff sidebar.
 
+### What's new (1.42.1 and 1.42.2)
+
+Integrity and safety fixes from the November 2026 pull-request review (1.42.2 also fixes a rare checkout stall that 1.42.1 could show when several payments for one bill arrived at the same moment; update straight to 1.42.2):
+
+- **Two tills can no longer overpay one bill.** Partial and final payments on the same open bill are serialised; a retried request is a replay, never a second charge.
+- **Gift-card refunds credit exactly what the refund says.** A refund to a gift card is capped at what was paid by card (a ₹100 bill paid ₹60 card + ₹40 cash can send at most ₹60 back to the card) and is refused on bills paid without one.
+- **Online-payment refunds are safer.** An unclear answer from the provider (timeout, 409, 429, 5xx) keeps the hold for review instead of risking a second refund, a provider-pending refund stays reconcilable, and owners can close a reviewed entry from Settings → Payments.
+- **Permissions:** a DENY override now also removes a permission that was only implied by another one, and editing someone's overrides respects the same "nobody can touch an account stronger than their own" rule as roles.
+- **Reports and accounting:** the GST report reconciles to the tax stored on each bill (loyalty points are tender, not a discount); bank lines that are money-in can't be matched to an expense, and one expense can't back two bank lines.
+- **Customer dues** cover every open bill without loading them all at once; if the detail list is capped the page says so and the totals still include everything.
+- **Stock:** goods received into negative stock keep the balance equal to the movement history; a stock take sent twice applies once; emptying the recipe of a recipe-tracked dish is refused.
+- **Phone POS:** a failed save during checkout no longer leaves stock half-deducted, and restoring a backup (including older ones) continues receipt, order and KOT numbering instead of restarting at 001.
+- **Stored credentials:** the S3 backup secret and the sync API key are now encrypted at rest (existing values keep working and are re-encrypted the next time they are saved).
+- **CI** now runs the manufacturing e2e suite that a flag-matching bug had been skipping.
+
 ### What's new (1.31)
 
 - **Manufacturing costs.** Record a production batch from what was really used and made, add labour/packaging/fuel, and see the cost per finished unit. Posting is one transaction; history never changes when prices change later. Optionally set the menu selling price from the same screen (separate permission, conflict-safe, with price history). Reports by day, item, ingredient, cost category, and price changes. Mobile-first five-step flow.
@@ -291,9 +322,11 @@ Yes — every report exports to Excel, PDF or CSV, and can be emailed on a
 daily, weekly or monthly schedule through your own SMTP server.
 
 **What is not built yet?** Gateways beyond Razorpay, Stripe and Cashfree
-(and refunds from inside OrderRestro), direct
-accounting-software and delivery-platform connectors, weighing-scale and
-label printers, a SQLite edition and native installers. The
+(Cashfree refunds are made in the Cashfree dashboard; Razorpay and Stripe
+refunds are sent from OrderRestro), direct accounting-software and
+delivery-platform connectors, weighing-scale and label printers, and a SQLite
+edition. Linux (`.deb`), Android and Windows (MSIX) installers exist; see
+[Install](#install-orderrestro). The
 [roadmap](./ROADMAP.md) is explicit about what is done and what is not.
 
 ## Tech stack
@@ -472,6 +505,7 @@ docs/           Screenshots and supplementary docs
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Tech-stack decisions and the reasoning behind each one |
 | [`ROADMAP.md`](./ROADMAP.md) | Phased build plan / living TODO — checkboxes are the real status |
 | [`DESIGN_SYSTEM.md`](./DESIGN_SYSTEM.md) | Visual language, tokens, type scale, component inventory, per-surface UX notes |
+| [`docs/CUSTOMER-DUES.md`](./docs/CUSTOMER-DUES.md) | Part payments, credit bills, the customer dues view, later payments and WhatsApp reminders |
 | [`casaos/README.md`](./casaos/README.md) | CasaOS/ZimaOS one-click install, image publishing, official app store submission steps |
 | [`windows/msix/README.md`](./windows/msix/README.md) | Windows MSIX desktop client — what it is/isn't, build/validate instructions, capabilities, what's CI-verified vs. not tested on real hardware |
 | [`ACCESSIBILITY.md`](./ACCESSIBILITY.md) | WCAG 2.1 AA target, what's implemented, testing methodology, known gaps |

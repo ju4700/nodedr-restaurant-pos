@@ -393,7 +393,7 @@ export class UsersService {
    */
   async setPermissionOverrides(
     restaurantId: string,
-    actor: { id: string; permissions: string[] },
+    actor: SessionUser,
     targetId: string,
     dto: SetPermissionOverridesDto,
   ) {
@@ -404,7 +404,10 @@ export class UsersService {
     }
     const target = await this.prisma.user.findFirst({
       where: { id: targetId, restaurantId },
-      include: { role: true },
+      include: {
+        role: { include: { permissions: { include: { permission: true } } } },
+        permissionOverrides: { include: { permission: true } },
+      },
     });
     if (!target) throw new NotFoundException('Staff account not found');
     if (target.role.name === 'OWNER') {
@@ -412,6 +415,9 @@ export class UsersService {
         'The owner role cannot have permission overrides',
       );
     }
+    // Editing overrides is account management like any other: a limited
+    // staff manager must not be able to lock out a stronger account.
+    assertMayManageRole(actor, userCeilingSubject(target));
 
     const keys = dto.overrides.map((o) => o.permissionKey);
     if (new Set(keys).size !== keys.length) {

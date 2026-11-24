@@ -215,17 +215,20 @@ export class StockLocationsService {
           createdById: userId,
         },
       });
-      await this.audit.record({
-        userId,
-        action: 'stock.location_transfer',
-        entity: 'Ingredient',
-        entityId: ing.id,
-        metadata: {
-          qty: qty.toString(),
-          from: dto.fromLocationId ?? 'unassigned',
-          to: dto.toLocationId,
+      await this.audit.record(
+        {
+          userId,
+          action: 'stock.location_transfer',
+          entity: 'Ingredient',
+          entityId: ing.id,
+          metadata: {
+            qty: qty.toString(),
+            from: dto.fromLocationId ?? 'unassigned',
+            to: dto.toLocationId,
+          },
         },
-      });
+        tx,
+      );
       return t;
     });
   }

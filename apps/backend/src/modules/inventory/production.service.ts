@@ -908,25 +908,28 @@ export class ProductionService {
           qualityAt: new Date(),
         },
       });
-      await this.audit.record({
-        userId,
-        action: 'production.quality',
-        entity: 'ProductionEntry',
-        entityId: id,
-        metadata: {
-          entryNo: e.entryNo,
-          before: e.qualityResult
-            ? {
-                result: e.qualityResult,
-                grade: e.qualityGrade,
-                notes: e.qualityNotes,
-                by: e.qualityById,
-                at: e.qualityAt,
-              }
-            : null,
-          after: { result: dto.result, grade, notes },
+      await this.audit.record(
+        {
+          userId,
+          action: 'production.quality',
+          entity: 'ProductionEntry',
+          entityId: id,
+          metadata: {
+            entryNo: e.entryNo,
+            before: e.qualityResult
+              ? {
+                  result: e.qualityResult,
+                  grade: e.qualityGrade,
+                  notes: e.qualityNotes,
+                  by: e.qualityById,
+                  at: e.qualityAt,
+                }
+              : null,
+            after: { result: dto.result, grade, notes },
+          },
         },
-      });
+        tx,
+      );
     });
     return this.get(branchId, id);
   }
@@ -1228,6 +1231,39 @@ export class ProductionService {
     return this.get(branchId, id);
   }
 
+  /**
+   * After reversing a costed batch, rebuild the finished item's weighted
+   * average from the batches that remain. Posting changed costPerUnit; voiding
+   * previously only changed stock, leaving a stale (and compounding) cost.
+   */
+  private async restoreOutputCost(
+    tx: Tx,
+    branchId: string,
+    ingredientId: string,
+  ) {
+    const ing = await tx.ingredient.findUniqueOrThrow({
+      where: { id: ingredientId },
+    });
+    const stock = Dec(ing.currentStock);
+    if (stock.lte(0)) return; // no units left: keep the existing cost
+    const batches = await tx.stockBatch.findMany({
+      where: { branchId, ingredientId, quantityRemaining: { gt: 0 } },
+      select: { quantityRemaining: true, unitCost: true },
+    });
+    if (!batches.length) return;
+    const total = batches.reduce(
+      (sum, b) => sum.plus(Dec(b.quantityRemaining).mul(b.unitCost)),
+      Dec(0),
+    );
+    const avg = total
+      .div(batches.reduce((sum, b) => sum.plus(b.quantityRemaining), Dec(0)))
+      .toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+    await tx.ingredient.update({
+      where: { id: ingredientId },
+      data: { costPerUnit: avg },
+    });
+  }
+
   private async voidInTx(
     tx: Tx,
     branchId: string,
@@ -1318,6 +1354,7 @@ export class ProductionService {
         where: { id: m.ingredientId },
         data: { currentStock: Dec(ing.currentStock).minus(m.quantity) },
       });
+      await this.restoreOutputCost(tx, branchId, m.ingredientId);
     }
     // Raw materials go back into the batches they were drawn from.
     for (const m of moves.filter((x) => x.type === 'PRODUCTION_USE')) {
@@ -1381,6 +1418,10 @@ export class ProductionService {
   ) {
     const { reason, ...rest } = dto;
     const newId = await this.prisma.$transaction(async (tx) => {
+      // Lock order must match create()/post(): advisory lock first, ingredient
+      // row locks second. voidInTx() takes the row locks, so taking the
+      // advisory lock afterwards can deadlock against a concurrent post().
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'production:' + branchId}))`;
       await this.voidInTx(tx, branchId, userId, id, `Corrected: ${reason}`);
       const created = await this.createInTx(
         tx,

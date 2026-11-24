@@ -17,6 +17,7 @@ on:
   pull_request:
     paths:
       - 'windows/**'
+      - '.github/workflows/windows-msix.yml'
   workflow_dispatch: {}
 
 jobs:

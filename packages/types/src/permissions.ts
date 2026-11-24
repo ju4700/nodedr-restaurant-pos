@@ -67,6 +67,9 @@ export const PERMISSION_IMPLIES: Partial<Record<PermissionKey, PermissionKey[]>>
 
 /** True when `held` satisfies `required`, directly or through PERMISSION_IMPLIES. */
 export function permissionSatisfied(held: readonly string[], required: string): boolean {
+  // A live DENY override is carried as `!key` by effectivePermissions(). It
+  // wins over both direct grants and implied permissions.
+  if (held.includes(`!${required}`)) return false;
   if (held.includes(required)) return true;
   return Object.entries(PERMISSION_IMPLIES).some(
     ([owner, implied]) => held.includes(owner) && (implied as string[]).includes(required),

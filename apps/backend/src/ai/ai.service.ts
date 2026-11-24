@@ -30,6 +30,10 @@ export interface ChatCompletionOptions {
   model?: string;
 }
 
+/** Model ids the picker may send; anything else falls back to the provider default. */
+const GEMINI_MODELS = new Set(['gemini-flash-latest', 'gemini-2.5-flash-lite']);
+const OPENAI_MODELS = new Set(['gpt-4o', 'gpt-4o-mini']);
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -74,12 +78,30 @@ export class AiService {
     }
 
     // If an LLM key is configured, invoke the provider
+    // Say which model really answered. The picker offers every provider, but only the configured one can
+    // respond, so a mismatch must be visible to the user instead of silently answering with something else.
     if (geminiKey) {
-      return this.callGemini(messages, geminiKey, options.model);
+      const reply = await this.callGemini(messages, geminiKey, options.model);
+      const used = GEMINI_MODELS.has(options.model ?? '')
+        ? (options.model as string)
+        : 'gemini-flash-latest';
+      return {
+        ...reply,
+        modelUsed: used,
+        modelFallback: !!options.model && options.model !== used,
+      };
     }
 
     if (openaiKey) {
-      return this.callOpenAI(messages, openaiKey);
+      const reply = await this.callOpenAI(messages, openaiKey, options.model);
+      const used = OPENAI_MODELS.has(options.model ?? '')
+        ? (options.model as string)
+        : 'gpt-4o-mini';
+      return {
+        ...reply,
+        modelUsed: used,
+        modelFallback: !!options.model && options.model !== used,
+      };
     }
 
     // Graceful offline fallback: Contextual restaurant assistant response
@@ -219,8 +241,11 @@ export class AiService {
       }));
 
       // In KitchenOS and modern Gemini endpoints, 'gemini-flash-latest' or 'gemini-3.8-flash' is active
+      // Only allow known Gemini model ids into the provider URL; an unknown
+      // id (e.g. an OpenAI/Claude id from an older UI) falls back to the default.
+      const allowedGeminiModels = GEMINI_MODELS;
       const modelToUse =
-        selectedModel && selectedModel !== 'gemini-1.5-flash'
+        selectedModel && allowedGeminiModels.has(selectedModel)
           ? selectedModel
           : 'gemini-flash-latest';
 
@@ -338,7 +363,11 @@ export class AiService {
     }
   }
 
-  private async callOpenAI(messages: ChatMessage[], apiKey: string) {
+  private async callOpenAI(
+    messages: ChatMessage[],
+    apiKey: string,
+    selectedModel?: string,
+  ) {
     try {
       const formattedMessages = [
         { role: 'system', content: SYSTEM_GUIDE_PROMPT },
@@ -352,7 +381,10 @@ export class AiService {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
+          model:
+            selectedModel && OPENAI_MODELS.has(selectedModel)
+              ? selectedModel
+              : 'gpt-4o-mini',
           messages: formattedMessages,
         }),
       });

@@ -19,6 +19,7 @@ import {
   useGatewayConnections,
   useRecentGatewayPayments,
   useRefundsToReview,
+  useResolveRefund,
   type GatewayMode,
   type GatewayPaymentRow,
   type GatewayProvider,
@@ -410,6 +411,37 @@ function PaymentRow({ r }: { r: GatewayPaymentRow }) {
   );
 }
 
+/** Closes a refund the owner has checked by hand; never moves money. */
+function ResolveRefund({ id, linked }: { id: string; linked: boolean }) {
+  const resolve = useResolveRefund();
+  const [note, setNote] = useState("");
+  const outcome = linked ? "SETTLED_OUTSIDE_GATEWAY" : "NOT_REFUNDED_AT_PROVIDER";
+  const inputId = `resolve-note-${id}`;
+  return (
+    <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end">
+      <div className="flex flex-1 flex-col gap-1">
+        <Label htmlFor={inputId} className="text-xs">
+          {linked ? "How was the customer paid back?" : "What did you check in the provider dashboard?"}
+        </Label>
+        <Input id={inputId} value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} />
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        disabled={note.trim().length < 3 || resolve.isPending}
+        onClick={() => resolve.mutate({ id, outcome, note: note.trim() })}
+      >
+        {linked ? "Mark as settled outside the gateway" : "No refund exists there: release the hold"}
+      </Button>
+      {resolve.isError && (
+        <span role="alert" className="text-sm text-destructive">
+          {resolve.error instanceof ApiError ? resolve.error.message : "Could not close this entry."}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** What needs a person comes first; the history sits below it. */
 function RecentPayments() {
   const q = useRecentGatewayPayments();
@@ -434,6 +466,7 @@ function RecentPayments() {
               <li key={r.id} className="flex flex-col gap-1 py-3">
                 <span className="font-medium tabular-nums">{formatCurrency(fromMinorUnits(r.amountMinor, r.currency), r.currency)} · {r.provider}{r.providerRefundId ? ` · ${r.providerRefundId}` : ""}</span>
                 {r.note && <span className="text-muted-foreground">{r.note}</span>}
+                {r.status === "NEEDS_REVIEW" && <ResolveRefund id={r.id} linked={r.hasLocalRefund} />}
               </li>
             ))}
           </ul>

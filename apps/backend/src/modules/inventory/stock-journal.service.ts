@@ -49,96 +49,125 @@ export class StockJournalService {
       });
       if (dup) return dup;
     }
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${dto.ingredientId} FOR UPDATE`;
-      const ing = await tx.ingredient.findFirst({
-        where: { id: dto.ingredientId, branchId },
-      });
-      if (!ing) throw new NotFoundException('Stock item not found');
-      const qty = toBaseQuantity(
-        dto.quantity,
-        dto.unit,
-        ing.unit,
-        ing.conversions,
-        ing.name,
-      );
-      const supplier = dto.supplierId
-        ? await tx.supplier.findFirst({
-            where: { id: dto.supplierId, branchId },
-            select: { name: true },
-          })
-        : null;
-      if (dto.supplierId && !supplier)
-        throw new BadRequestException('Supplier not found');
-      const rate =
-        dto.unitCost !== undefined && dto.unitCost !== ''
-          ? Dec(dto.unitCost)
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${dto.ingredientId} FOR UPDATE`;
+        const ing = await tx.ingredient.findFirst({
+          where: { id: dto.ingredientId, branchId },
+        });
+        if (!ing) throw new NotFoundException('Stock item not found');
+        const qty = toBaseQuantity(
+          dto.quantity,
+          dto.unit,
+          ing.unit,
+          ing.conversions,
+          ing.name,
+        );
+        const supplier = dto.supplierId
+          ? await tx.supplier.findFirst({
+              where: { id: dto.supplierId, branchId },
+              select: { name: true },
+            })
           : null;
-      if (rate && (!rate.isFinite() || rate.isNegative()))
-        throw new BadRequestException('The cost must be zero or more');
-      const batch = await tx.stockBatch.create({
-        data: {
-          branchId,
-          ingredientId: ing.id,
-          batchNumber: dto.idempotencyKey
-            ? `K:${dto.idempotencyKey}`
-            : dto.reference || 'RCV',
-          quantityReceived: qty,
-          quantityRemaining: qty,
-          unitCost: rate ?? 0,
-          expiryDate: dto.expiryDate,
-          receivedAt: dto.receivedAt ?? new Date(),
-        },
+        if (dto.supplierId && !supplier)
+          throw new BadRequestException('Supplier not found');
+        const rate =
+          dto.unitCost !== undefined && dto.unitCost !== ''
+            ? Dec(dto.unitCost)
+            : null;
+        if (rate && (!rate.isFinite() || rate.isNegative()))
+          throw new BadRequestException('The cost must be zero or more');
+        const batch = await tx.stockBatch.create({
+          data: {
+            branchId,
+            ingredientId: ing.id,
+            batchNumber: dto.idempotencyKey
+              ? `K:${dto.idempotencyKey}`
+              : dto.reference || 'RCV',
+            idempotencyKey: dto.idempotencyKey || null,
+            quantityReceived: qty,
+            quantityRemaining: qty,
+            unitCost: rate ?? 0,
+            expiryDate: dto.expiryDate,
+            receivedAt: dto.receivedAt ?? new Date(),
+          },
+        });
+        const note = [
+          supplier?.name && `From ${supplier.name}`,
+          dto.reference && `Ref ${dto.reference}`,
+          dto.location && `At ${dto.location}`,
+          dto.note,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        await tx.stockMovement.create({
+          data: {
+            branchId,
+            ingredientId: ing.id,
+            batchId: batch.id,
+            type: 'RECEIPT',
+            quantity: qty,
+            note: note || 'Stock received',
+            createdById: userId,
+            deviceId: dto.deviceId,
+          },
+        });
+        const oldStock = Dec(ing.currentStock);
+        const avg = rate
+          ? oldStock.lte(0)
+            ? rate
+            : oldStock
+                .mul(ing.costPerUnit)
+                .plus(qty.mul(rate))
+                .div(oldStock.plus(qty))
+                .toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP)
+          : null;
+        await tx.ingredient.update({
+          where: { id: ing.id },
+          data: {
+            currentStock: oldStock.plus(qty),
+            ...(avg ? { costPerUnit: avg } : {}),
+          },
+        });
+        await this.audit.record(
+          {
+            userId,
+            action: 'stock.receive',
+            entity: 'Ingredient',
+            entityId: ing.id,
+            metadata: { qty: qty.toString(), reference: dto.reference },
+          },
+          tx,
+        );
+        return tx.stockBatch.findUniqueOrThrow({
+          where: { id: batch.id },
+          include: { stockMovements: true },
+        });
       });
-      const note = [
-        supplier?.name && `From ${supplier.name}`,
-        dto.reference && `Ref ${dto.reference}`,
-        dto.location && `At ${dto.location}`,
-        dto.note,
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      await tx.stockMovement.create({
-        data: {
-          branchId,
-          ingredientId: ing.id,
-          batchId: batch.id,
-          type: 'RECEIPT',
-          quantity: qty,
-          note: note || 'Stock received',
-          createdById: userId,
-          deviceId: dto.deviceId,
-        },
-      });
-      const oldStock = Dec(ing.currentStock);
-      const avg = rate
-        ? oldStock.lte(0)
-          ? rate
-          : oldStock
-              .mul(ing.costPerUnit)
-              .plus(qty.mul(rate))
-              .div(oldStock.plus(qty))
-              .toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP)
-        : null;
-      await tx.ingredient.update({
-        where: { id: ing.id },
-        data: {
-          currentStock: oldStock.plus(qty),
-          ...(avg ? { costPerUnit: avg } : {}),
-        },
-      });
-      await this.audit.record({
-        userId,
-        action: 'stock.receive',
-        entity: 'Ingredient',
-        entityId: ing.id,
-        metadata: { qty: qty.toString(), reference: dto.reference },
-      });
-      return tx.stockBatch.findUniqueOrThrow({
-        where: { id: batch.id },
-        include: { stockMovements: true },
-      });
-    });
+    } catch (e) {
+      // Concurrent copies of one request race on the unique key (P2002), or give up waiting for the row locks the
+      // first copy holds (P2028 start timeout, P2034 conflict). In all three the first copy is the one that counts:
+      // wait briefly for it to commit and return its result instead of surfacing a 500 for a duplicate.
+      if (
+        dto.idempotencyKey &&
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        ['P2002', 'P2028', 'P2034'].includes(e.code)
+      ) {
+        for (let attempt = 0; attempt < 15; attempt++) {
+          const winner = await this.prisma.stockTake.findUnique({
+            where: {
+              branchId_idempotencyKey: {
+                branchId,
+                idempotencyKey: dto.idempotencyKey,
+              },
+            },
+          });
+          if (winner) return winner;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+      throw e;
+    }
   }
 
   // ---- stock take (the shelf count) ------------------------------------------------------
@@ -155,150 +184,173 @@ export class StockJournalService {
       });
       if (dup) return dup;
     }
-    return this.prisma.$transaction(async (tx) => {
-      const ids = [...new Set(dto.lines.map((l) => l.ingredientId))].sort();
-      if (ids.length !== dto.lines.length)
-        throw new BadRequestException('An item is on the sheet twice');
-      for (const id of ids)
-        await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${id} FOR UPDATE`;
-      const items = await tx.ingredient.findMany({
-        where: { id: { in: ids }, branchId },
-      });
-      if (items.length !== ids.length)
-        throw new NotFoundException('A counted item was not found');
-      const byId = new Map(items.map((i) => [i.id, i]));
-      // When the sheet is for a place the restaurant has set up, the count is compared with what was
-      // recorded IN that place, and the place's level is set to the count; the item's total moves by the difference.
-      const place = dto.area
-        ? await tx.stockLocation.findFirst({
-            where: { branchId, name: dto.area, isActive: true },
-          })
-        : null;
-      const placeLevels = place
-        ? new Map(
-            (
-              await tx.stockLevel.findMany({
-                where: { locationId: place.id, ingredientId: { in: ids } },
-              })
-            ).map((l) => [l.ingredientId, l.quantity]),
-          )
-        : null;
-      const take = await tx.stockTake.create({
-        data: {
-          branchId,
-          takenAt: dto.takenAt ?? new Date(),
-          area: dto.area,
-          note: dto.note,
-          idempotencyKey: dto.idempotencyKey,
-          deviceId: dto.deviceId,
-          createdById: userId,
-          lines: [],
-        },
-      });
-      const out: {
-        ingredientId: string;
-        name: string;
-        unit: string;
-        expected: string;
-        counted: string;
-        difference: string;
-      }[] = [];
-      for (const l of dto.lines) {
-        const ing = byId.get(l.ingredientId)!;
-        const counted = Dec(l.counted).isZero()
-          ? Dec(0)
-          : toBaseQuantity(
-              l.counted,
-              l.unit,
-              ing.unit,
-              ing.conversions,
-              ing.name,
-            );
-        if (Dec(l.counted).isNegative())
-          throw new BadRequestException(
-            `${ing.name}: a count cannot be negative`,
-          );
-        const expected = placeLevels
-          ? Dec(placeLevels.get(ing.id) ?? 0)
-          : Dec(ing.currentStock);
-        const diff = counted.minus(expected);
-        out.push({
-          ingredientId: ing.id,
-          name: ing.name,
-          unit: ing.unit,
-          expected: expected.toString(),
-          counted: counted.toString(),
-          difference: diff.toString(),
+    try {
+      const { saved, out } = await this.prisma.$transaction(async (tx) => {
+        const ids = [...new Set(dto.lines.map((l) => l.ingredientId))].sort();
+        if (ids.length !== dto.lines.length)
+          throw new BadRequestException('An item is on the sheet twice');
+        for (const id of ids)
+          await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${id} FOR UPDATE`;
+        const items = await tx.ingredient.findMany({
+          where: { id: { in: ids }, branchId },
         });
-        if (diff.isZero()) continue;
-        if (place)
-          await tx.stockLevel.upsert({
-            where: {
-              ingredientId_locationId: {
+        if (items.length !== ids.length)
+          throw new NotFoundException('A counted item was not found');
+        const byId = new Map(items.map((i) => [i.id, i]));
+        // When the sheet is for a place the restaurant has set up, the count is compared with what was
+        // recorded IN that place, and the place's level is set to the count; the item's total moves by the difference.
+        const place = dto.area
+          ? await tx.stockLocation.findFirst({
+              where: { branchId, name: dto.area, isActive: true },
+            })
+          : null;
+        const placeLevels = place
+          ? new Map(
+              (
+                await tx.stockLevel.findMany({
+                  where: { locationId: place.id, ingredientId: { in: ids } },
+                })
+              ).map((l) => [l.ingredientId, l.quantity]),
+            )
+          : null;
+        const take = await tx.stockTake.create({
+          data: {
+            branchId,
+            takenAt: dto.takenAt ?? new Date(),
+            area: dto.area,
+            note: dto.note,
+            idempotencyKey: dto.idempotencyKey,
+            deviceId: dto.deviceId,
+            createdById: userId,
+            lines: [],
+          },
+        });
+        const out: {
+          ingredientId: string;
+          name: string;
+          unit: string;
+          expected: string;
+          counted: string;
+          difference: string;
+        }[] = [];
+        for (const l of dto.lines) {
+          const ing = byId.get(l.ingredientId)!;
+          const counted = Dec(l.counted).isZero()
+            ? Dec(0)
+            : toBaseQuantity(
+                l.counted,
+                l.unit,
+                ing.unit,
+                ing.conversions,
+                ing.name,
+              );
+          if (Dec(l.counted).isNegative())
+            throw new BadRequestException(
+              `${ing.name}: a count cannot be negative`,
+            );
+          const expected = placeLevels
+            ? Dec(placeLevels.get(ing.id) ?? 0)
+            : Dec(ing.currentStock);
+          const diff = counted.minus(expected);
+          out.push({
+            ingredientId: ing.id,
+            name: ing.name,
+            unit: ing.unit,
+            expected: expected.toString(),
+            counted: counted.toString(),
+            difference: diff.toString(),
+          });
+          if (diff.isZero()) continue;
+          if (place)
+            await tx.stockLevel.upsert({
+              where: {
+                ingredientId_locationId: {
+                  ingredientId: ing.id,
+                  locationId: place.id,
+                },
+              },
+              create: {
                 ingredientId: ing.id,
                 locationId: place.id,
+                quantity: counted,
               },
-            },
-            create: {
-              ingredientId: ing.id,
-              locationId: place.id,
-              quantity: counted,
-            },
-            update: { quantity: counted },
-          });
-        const note = `Stock take: counted ${counted.toString()}, system had ${expected.toString()}${dto.area ? ` (${dto.area})` : ''}`;
-        if (diff.isNegative()) {
-          await this.stock.consumeStock(tx, branchId, ing.id, diff.abs(), {
-            type: 'ADJUSTMENT',
-            note,
-            userId,
-            allowNegative: false,
-            refs: { deviceId: dto.deviceId },
-          });
-        } else {
-          const batch = await tx.stockBatch.create({
-            data: {
-              branchId,
-              ingredientId: ing.id,
-              batchNumber: 'COUNT',
-              quantityReceived: diff,
-              quantityRemaining: diff,
-              unitCost: 0,
-            },
-          });
-          await tx.stockMovement.create({
-            data: {
-              branchId,
-              ingredientId: ing.id,
-              batchId: batch.id,
+              update: { quantity: counted },
+            });
+          const note = `Stock take: counted ${counted.toString()}, system had ${expected.toString()}${dto.area ? ` (${dto.area})` : ''}`;
+          if (diff.isNegative()) {
+            await this.stock.consumeStock(tx, branchId, ing.id, diff.abs(), {
               type: 'ADJUSTMENT',
-              quantity: diff,
               note,
-              createdById: userId,
-              deviceId: dto.deviceId,
-            },
-          });
-          await tx.ingredient.update({
-            where: { id: ing.id },
-            data: { currentStock: Dec(ing.currentStock).plus(diff) },
-          });
+              userId,
+              allowNegative: false,
+              refs: { deviceId: dto.deviceId },
+            });
+          } else {
+            const batch = await tx.stockBatch.create({
+              data: {
+                branchId,
+                ingredientId: ing.id,
+                batchNumber: 'COUNT',
+                quantityReceived: diff,
+                quantityRemaining: diff,
+                unitCost: 0,
+              },
+            });
+            await tx.stockMovement.create({
+              data: {
+                branchId,
+                ingredientId: ing.id,
+                batchId: batch.id,
+                type: 'ADJUSTMENT',
+                quantity: diff,
+                note,
+                createdById: userId,
+                deviceId: dto.deviceId,
+              },
+            });
+            await tx.ingredient.update({
+              where: { id: ing.id },
+              data: { currentStock: Dec(ing.currentStock).plus(diff) },
+            });
+          }
         }
-      }
+        const saved = await tx.stockTake.update({
+          where: { id: take.id },
+          data: { lines: out },
+        });
+        return { saved, out };
+      });
+      // Audit AFTER the commit, through the normal client: recording it inside the transaction needs a second
+      // pool connection while the transaction holds one, which deadlocks once concurrent requests fill the pool.
       await this.audit.record({
         userId,
         action: 'stock.take',
         entity: 'StockTake',
-        entityId: take.id,
+        entityId: saved.id,
         metadata: {
           items: out.length,
           changed: out.filter((o) => o.difference !== '0').length,
         },
       });
-      return tx.stockTake.update({
-        where: { id: take.id },
-        data: { lines: out },
-      });
-    });
+      return saved;
+    } catch (e) {
+      if (
+        dto.idempotencyKey &&
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        const winner = await this.prisma.stockTake.findUnique({
+          where: {
+            branchId_idempotencyKey: {
+              branchId,
+              idempotencyKey: dto.idempotencyKey,
+            },
+          },
+        });
+        if (winner) return winner;
+      }
+      throw e;
+    }
   }
 
   listStockTakes(branchId: string) {
@@ -457,17 +509,20 @@ export class StockJournalService {
           data: { currentStock: Dec(ing.currentStock).plus(qty) },
         });
       }
-      await this.audit.record({
-        userId,
-        action: 'stock.adjust',
-        entity: 'Ingredient',
-        entityId: ing.id,
-        metadata: {
-          direction: dto.direction,
-          qty: qty.toString(),
-          reason: dto.reason,
+      await this.audit.record(
+        {
+          userId,
+          action: 'stock.adjust',
+          entity: 'Ingredient',
+          entityId: ing.id,
+          metadata: {
+            direction: dto.direction,
+            qty: qty.toString(),
+            reason: dto.reason,
+          },
         },
-      });
+        tx,
+      );
       return tx.ingredient.findUniqueOrThrow({
         where: { id: ing.id },
         select: { id: true, name: true, unit: true, currentStock: true },

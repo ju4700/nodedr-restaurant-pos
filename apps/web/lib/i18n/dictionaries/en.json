@@ -108,5 +108,10 @@
   "kiosk.ticket.notPaid": "NOT PAID",
   "kiosk.ticket.payAtCounter": "Pay at the counter",
   "kiosk.language": "Language",
-  "nav.myDeliveries": "My deliveries"
+  "nav.myDeliveries": "My deliveries",
+  "nav.group.sales": "Sales",
+  "nav.group.kitchen": "Kitchen & menu",
+  "nav.group.people": "Customers & delivery",
+  "nav.group.business": "Business",
+  "nav.group.admin": "Management"
 }

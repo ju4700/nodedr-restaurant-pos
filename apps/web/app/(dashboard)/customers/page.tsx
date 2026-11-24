@@ -13,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useBranch } from "@/hooks/use-branch";
 import { useCustomers, useDeleteCustomer, type Customer } from "@/hooks/use-customers";
 import { ApiError } from "@/lib/api";
+import { formatCurrency } from "@/lib/format";
 
 export default function CustomersPage() {
   const { branchId } = useBranch();
@@ -38,6 +39,7 @@ export default function CustomersPage() {
         <div>
           <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Customers</h1>
           <Link href="/ratings" className="mt-1 inline-block text-sm underline">Customer ratings</Link>
+          <Link href="/customers/dues" className="ml-3 mt-1 inline-block text-sm underline">Customer dues</Link>
           <p className="text-sm text-muted-foreground">Profiles, loyalty, and order history</p>
         </div>
         <AddCustomerDialog branchId={branchId} />
@@ -79,7 +81,7 @@ export default function CustomersPage() {
                 </span>
                 {Number(c.walletBalance) > 0 && (
                   <span className="flex items-center gap-1">
-                    <Gift className="h-3.5 w-3.5" />₹{c.walletBalance}
+                    <Gift className="h-3.5 w-3.5" />{formatCurrency(Number(c.walletBalance))}
                   </span>
                 )}
                 <div className="flex items-center gap-0.5">

@@ -6,6 +6,9 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { openStored, sealStored } from '../integration-hub/secret-box';
+
+const SYNC_CTX = 'sync-state:api-key';
 
 export interface SyncChange {
   seq?: string;
@@ -61,7 +64,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       // This process is the central server other devices sync with.
       await this.prisma.$executeRawUnsafe(
         `UPDATE sync_state SET role = 'server', enabled = true, "apiKey" = $1 WHERE id = 1`,
-        envKey,
+        sealStored(envKey, SYNC_CTX),
       );
       if (!(await this.state()).seeded)
         await this.prisma.$executeRawUnsafe('SELECT sync_seed()');
@@ -96,7 +99,10 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
         conflicts: unknown[];
       }[]
     >(`SELECT * FROM sync_state WHERE id = 1`);
-    return rows[0];
+    const row = rows[0];
+    // Stored sealed; rows written before sealing existed are plaintext and still read.
+    if (row?.apiKey) row.apiKey = openStored(row.apiKey, SYNC_CTX);
+    return row;
   }
 
   async publicStatus() {
@@ -358,7 +364,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
           `UPDATE sync_state SET enabled = false, role = 'client', "serverUrl" = $1, "apiKey" = $2,
              "lastPullSeq" = 0, "lastPushSeq" = 0, "lastError" = NULL, conflicts = '[]' WHERE id = 1`,
           serverUrl.replace(/\/+$/, ''),
-          apiKey,
+          sealStored(apiKey, SYNC_CTX),
         );
         await tx.$executeRawUnsafe('DELETE FROM sync_changes');
         if (mode === 'adopt') {

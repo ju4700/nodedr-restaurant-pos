@@ -345,7 +345,7 @@ function PosPageInner() {
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-6 overflow-hidden lg:grid-cols-[1fr_360px]">
           <div className="flex min-h-0 flex-col gap-3">
             <Card className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
-              <ProductGrid branchId={branchId} onSelect={handleSelect} />
+              <ProductGrid branchId={branchId} onSelect={handleSelect} allItems={allItems} />
             </Card>
           </div>
 

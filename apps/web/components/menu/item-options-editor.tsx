@@ -83,8 +83,14 @@ export async function saveOptionDrafts(branchId: string | null, drafts: GroupDra
       maxSelect: g.choose === "MANY" ? Math.max(2, g.maxSelect) : 1,
       modifiers: g.options.map((o, i) => ({ ...(o.id ? { id: o.id } : {}), name: o.name.trim(), priceAdjustment: o.price.trim() === "" ? 0 : Number(o.price), isDefault: g.choose !== "MANY" ? o.isDefault : o.isDefault, sortOrder: i })),
     };
-    if (!g.id) ids.push((await api.post<ModifierGroup>(`/menu/modifier-groups?branchId=${branchId}`, body)).id);
-    else {
+    if (!g.id) {
+      const created = await api.post<ModifierGroup>(`/menu/modifier-groups?branchId=${branchId}`, body);
+      // Write the id back into the draft: if the item save fails and the user
+      // retries, this group is patched instead of created a second time.
+      g.id = created.id;
+      g.dirty = false;
+      ids.push(created.id);
+    } else {
       if (g.dirty) await api.patch(`/menu/modifier-groups/${g.id}?branchId=${branchId}`, body);
       ids.push(g.id);
     }

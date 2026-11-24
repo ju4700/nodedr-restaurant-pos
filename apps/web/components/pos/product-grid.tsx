@@ -13,9 +13,12 @@ import { findItemByCode } from "@/lib/pos-scan";
 export function ProductGrid({
   branchId,
   onSelect,
+  allItems,
 }: {
   branchId: string | null;
   onSelect: (item: MenuItem) => void;
+  /** Full unfiltered menu, used for barcode lookup only (scans ignore category filters). */
+  allItems?: MenuItem[];
 }) {
   const { data: categories } = useCategories(branchId);
   const [activeCategoryId, setActiveCategoryId] = useState<string | undefined>(undefined);
@@ -55,7 +58,7 @@ export function ProductGrid({
           onKeyDown={(e) => {
             // A scanner focused in this box ends with Enter: add the exact barcode/SKU match and clear the box.
             if (e.key !== "Enter") return;
-            const hit = findItemByCode(sellable, search);
+            const hit = findItemByCode((allItems ?? items ?? []).filter((i) => i.isActive), search);
             if (!hit) return;
             e.preventDefault();
             onSelect(hit);

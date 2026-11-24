@@ -60,13 +60,13 @@ export function EditItemDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const stockTrackingHandleRef = useRef<StockTrackingHandle | null>(null);
   const queryClient = useQueryClient();
-  const [imageUrl, setImageUrl] = useState<string | undefined>(item.imageUrl ?? undefined);
+  const [imageUrl, setImageUrl] = useState<string | null | undefined>(item.imageUrl ?? undefined);
   const [imagePreview, setImagePreview] = useState<string | undefined>(item.imageUrl ?? undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: stations } = useStations(branchId);
   const { data: settings } = useDisplaySettings(branchId);
-  const { data: me } = useCurrentUser();
+  const { data: me, isLoading: meLoading } = useCurrentUser();
   const updateItem = useUpdateMenuItem(branchId);
   const uploadImage = useUploadItemImage();
   const priceLabel =
@@ -112,6 +112,14 @@ export function EditItemDialog({
     }
     setSavingOptions(false);
 
+    // Never silently skip stock rules: if the user may manage inventory but
+    // the rules are still loading (or failed), refuse the save with a message.
+    if (hasPermission(me?.user, "inventory.manage") && !item.isCombo && !stockTrackingHandleRef.current) {
+      // Combos deduct through their components and have no stock form, so there is nothing to wait for.
+      toast.error("Stock rules have not loaded yet. Wait a moment and try again; if this keeps happening, close and reopen this dialog.");
+      setIsSubmitting(false);
+      return;
+    }
     // Atomically save stock tracking / recipe rules
     if (stockTrackingHandleRef.current) {
       const stockSuccess = await stockTrackingHandleRef.current.save();
@@ -139,7 +147,7 @@ export function EditItemDialog({
       {
         onSuccess: () => {
           setIsSubmitting(false);
-          toast.success(`"${name}" updated and stock tracking saved`);
+          toast.success(`"${name}" updated${stockTrackingHandleRef.current ? " and stock tracking saved" : ""}`);
           onClose();
         },
         onError: (err) => {
@@ -175,7 +183,7 @@ export function EditItemDialog({
                   <button
                     type="button"
                     onClick={() => {
-                      setImageUrl(undefined);
+                      setImageUrl(null); // explicit null so the PATCH clears it
                       setImagePreview(undefined);
                       if (fileInputRef.current) fileInputRef.current.value = "";
                     }}
@@ -329,7 +337,7 @@ export function EditItemDialog({
             <Button
               type="submit"
               className="w-full sm:w-auto h-10 px-6 rounded-xl font-semibold active:scale-95 transition-transform shadow-xs cursor-pointer bg-primary text-primary-foreground hover:bg-primary/90"
-              disabled={isSubmitting || updateItem.isPending || uploadImage.isPending || savingOptions}
+              disabled={isSubmitting || updateItem.isPending || uploadImage.isPending || savingOptions || meLoading}
             >
               {isSubmitting || updateItem.isPending || savingOptions ? "Saving…" : "Save changes"}
             </Button>

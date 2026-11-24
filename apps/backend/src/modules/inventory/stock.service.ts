@@ -89,6 +89,16 @@ export class StockService {
     }, 2_000).unref?.();
   }
 
+  private async lockIngredient(tx: Tx, branchId: string, ingredientId: string) {
+    // Read balances only after a waiting transaction has acquired the lock.
+    await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${ingredientId} AND "branchId" = ${branchId} FOR UPDATE`;
+    const ingredient = await tx.ingredient.findFirst({
+      where: { id: ingredientId, branchId },
+    });
+    if (!ingredient) throw new NotFoundException('Ingredient not found');
+    return ingredient;
+  }
+
   listMovements(branchId: string, ingredientId: string) {
     return this.prisma.stockMovement.findMany({
       where: { branchId, ingredientId },
@@ -135,23 +145,7 @@ export class StockService {
       refs?: MovementRefs;
     },
   ): Promise<StockConsumptionPortion[]> {
-    const ingredient = await tx.ingredient.findFirst({
-      where: { id: ingredientId, branchId },
-    });
-    if (!ingredient) throw new NotFoundException('Ingredient not found');
-
-    // Row lock: FIFO batch consumption reads multiple StockBatch rows plus
-    // the Ingredient's own currentStock, then writes all of them based on
-    // what it read — unlike a single balance column, this can't be made
-    // safe with a guarded atomic decrement alone. Locking the ingredient
-    // row for the rest of this transaction serializes concurrent
-    // consumeStock calls for the SAME ingredient (e.g. two checkouts
-    // selling the same low-stock item at once), so the second call's reads
-    // above would otherwise be safe only by luck — without this lock they
-    // can both see the same pre-consumption batch quantities and each
-    // independently subtract from them, silently over-consuming stock
-    // beyond what was actually on hand.
-    await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${ingredientId} FOR UPDATE`;
+    const ingredient = await this.lockIngredient(tx, branchId, ingredientId);
 
     const batches = await tx.stockBatch.findMany({
       where: { branchId, ingredientId, quantityRemaining: { gt: 0 } },
@@ -164,8 +158,14 @@ export class StockService {
       (sum, bt) => sum.plus(bt.quantityRemaining),
       Dec(0),
     );
+    // Manual adjustments (`adjustStock`) change currentStock without touching
+    // batches, so the two can disagree. With batches present, only the amount
+    // that BOTH sources agree is safe to consume with allowNegative=false;
+    // using the batch sum alone can drive currentStock below zero.
     const available =
-      batches.length > 0 ? availableFromBatches : Dec(ingredient.currentStock);
+      batches.length > 0
+        ? Prisma.Decimal.min(Dec(ingredient.currentStock), availableFromBatches)
+        : Dec(ingredient.currentStock);
 
     if (wanted.gt(available) && !opts.allowNegative) {
       throw new BadRequestException(
@@ -259,11 +259,7 @@ export class StockService {
     quantity: number,
     opts: { userId: string; orderId: string; note?: string },
   ): Promise<number> {
-    await tx.$queryRaw`SELECT id FROM ingredients WHERE id = ${ingredientId} FOR UPDATE`;
-    const ingredient = await tx.ingredient.findFirst({
-      where: { id: ingredientId, branchId },
-    });
-    if (!ingredient) throw new NotFoundException('Ingredient not found');
+    const ingredient = await this.lockIngredient(tx, branchId, ingredientId);
 
     const moves = await tx.stockMovement.findMany({
       where: { orderId: opts.orderId, ingredientId },
@@ -342,10 +338,7 @@ export class StockService {
     dto: StockAdjustmentDto,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      const ingredient = await tx.ingredient.findFirst({
-        where: { id: ingredientId, branchId },
-      });
-      if (!ingredient) throw new NotFoundException('Ingredient not found');
+      const ingredient = await this.lockIngredient(tx, branchId, ingredientId);
 
       const newStock = round3(Number(ingredient.currentStock) + dto.quantity);
       if (newStock < 0) {

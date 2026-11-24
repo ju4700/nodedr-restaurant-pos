@@ -40,8 +40,16 @@ export interface RecordAuditLogInput {
 export class AuditService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async record(input: RecordAuditLogInput): Promise<void> {
-    await this.prisma.auditLog.create({
+  /**
+   * Pass the surrounding transaction's client as `client` when recording from inside `$transaction(async (tx) => ...)`.
+   * The default client would borrow a SECOND pool connection while the transaction holds one, and under concurrent
+   * requests every connection can end up held by a transaction waiting for another: a pool deadlock.
+   */
+  async record(
+    input: RecordAuditLogInput,
+    client: Pick<PrismaService, 'auditLog'> = this.prisma,
+  ): Promise<void> {
+    await client.auditLog.create({
       data: {
         userId: input.userId ?? null,
         action: input.action,

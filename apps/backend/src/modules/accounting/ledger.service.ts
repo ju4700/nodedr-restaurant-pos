@@ -215,47 +215,50 @@ export class LedgerService {
    * within 5 days of the bank posting date. One expense matches one line.
    */
   async autoMatch(branchId: string): Promise<number> {
-    const txs = await this.prisma.bankTransaction.findMany({
-      where: { branchId, status: 'UNMATCHED', amount: { lt: 0 } },
-      orderBy: { postedOn: 'asc' },
-    });
-    if (!txs.length) return 0;
-    const taken = new Set(
-      (
-        await this.prisma.bankTransaction.findMany({
-          where: { branchId, expenseId: { not: null } },
-          select: { expenseId: true },
-        })
-      ).map((t) => t.expenseId as string),
-    );
-    const expenses = await this.prisma.expense.findMany({
-      where: { branchId, paidFromCash: false },
-    });
-    let count = 0;
-    for (const t of txs) {
-      const amt = Math.abs(Number(t.amount));
-      const best = expenses
-        .filter(
-          (e) =>
-            !taken.has(e.id) &&
-            Math.abs(Number(e.amount) - amt) < 0.005 &&
-            Math.abs(e.spentOn.getTime() - t.postedOn.getTime()) <=
-              5 * 86400000,
-        )
-        .sort(
-          (a, b) =>
-            Math.abs(a.spentOn.getTime() - t.postedOn.getTime()) -
-            Math.abs(b.spentOn.getTime() - t.postedOn.getTime()),
-        )[0];
-      if (!best) continue;
-      taken.add(best.id);
-      await this.prisma.bankTransaction.update({
-        where: { id: t.id },
-        data: { status: 'MATCHED', expenseId: best.id },
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`bank-match:${branchId}`}))`;
+      const txs = await tx.bankTransaction.findMany({
+        where: { branchId, status: 'UNMATCHED', amount: { lt: 0 } },
+        orderBy: { postedOn: 'asc' },
       });
-      count++;
-    }
-    return count;
+      if (!txs.length) return 0;
+      const taken = new Set(
+        (
+          await tx.bankTransaction.findMany({
+            where: { branchId, expenseId: { not: null } },
+            select: { expenseId: true },
+          })
+        ).map((t) => t.expenseId as string),
+      );
+      const expenses = await tx.expense.findMany({
+        where: { branchId, paidFromCash: false },
+      });
+      let count = 0;
+      for (const t of txs) {
+        const amt = Math.abs(Number(t.amount));
+        const best = expenses
+          .filter(
+            (e) =>
+              !taken.has(e.id) &&
+              Math.abs(Number(e.amount) - amt) < 0.005 &&
+              Math.abs(e.spentOn.getTime() - t.postedOn.getTime()) <=
+                5 * 86400000,
+          )
+          .sort(
+            (a, b) =>
+              Math.abs(a.spentOn.getTime() - t.postedOn.getTime()) -
+              Math.abs(b.spentOn.getTime() - t.postedOn.getTime()),
+          )[0];
+        if (!best) continue;
+        taken.add(best.id);
+        await tx.bankTransaction.update({
+          where: { id: t.id },
+          data: { status: 'MATCHED', expenseId: best.id },
+        });
+        count++;
+      }
+      return count;
+    });
   }
 
   async reconciliation(branchId: string, from?: string, to?: string) {
@@ -334,6 +337,9 @@ export class LedgerService {
       where: { id, branchId },
     });
     if (!t) throw new NotFoundException('Bank transaction not found');
+    // Only money-out lines represent spend that can be reconciled to an
+    // expense. A credit (deposit, refund received) has no expense to match.
+    if (Number(t.amount) >= 0) return [];
     const taken = (
       await this.prisma.bankTransaction.findMany({
         where: { branchId, expenseId: { not: null } },
@@ -356,19 +362,31 @@ export class LedgerService {
   }
 
   async matchManually(branchId: string, id: string, expenseId: string) {
-    const [t, e] = await Promise.all([
-      this.prisma.bankTransaction.findFirst({ where: { id, branchId } }),
-      this.prisma.expense.findFirst({ where: { id: expenseId, branchId } }),
-    ]);
-    if (!t || !e)
-      throw new NotFoundException('Transaction or expense not found');
-    const used = await this.prisma.bankTransaction.findFirst({
-      where: { branchId, expenseId, NOT: { id } },
-    });
-    if (used) throw new BadRequestException('That expense is already matched');
-    return this.prisma.bankTransaction.update({
-      where: { id },
-      data: { status: 'MATCHED', expenseId },
+    // One expense may back only one bank line. The read-then-write below is
+    // serialised per branch, so two requests (or a manual match racing the
+    // auto-matcher) cannot both claim the same expense.
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`bank-match:${branchId}`}))`;
+      const [t, e] = await Promise.all([
+        tx.bankTransaction.findFirst({ where: { id, branchId } }),
+        tx.expense.findFirst({ where: { id: expenseId, branchId } }),
+      ]);
+      if (!t || !e)
+        throw new NotFoundException('Transaction or expense not found');
+      if (Number(t.amount) >= 0) {
+        throw new BadRequestException(
+          'Only money-out bank lines can be matched to an expense',
+        );
+      }
+      const used = await tx.bankTransaction.findFirst({
+        where: { branchId, expenseId, NOT: { id } },
+      });
+      if (used)
+        throw new BadRequestException('That expense is already matched');
+      return tx.bankTransaction.update({
+        where: { id },
+        data: { status: 'MATCHED', expenseId },
+      });
     });
   }
 
@@ -416,7 +434,11 @@ export class LedgerService {
         _sum: { amount: true },
       }),
       this.prisma.payrollRun.findMany({
-        where: { branchId, status: 'FINALIZED', periodEnd: { lte: endDate } },
+        where: {
+          branchId,
+          status: { in: ['FINALIZED', 'PAID'] },
+          periodEnd: { lte: endDate },
+        },
         include: { lines: true },
       }),
       this.prisma.ingredient.findMany({
@@ -435,10 +457,7 @@ export class LedgerService {
     const payrollPaid = round2(
       payroll
         .flatMap((r) => r.lines)
-        .reduce(
-          (s, l) => s + Number(l.basePay) - Number(l.unpaidLeaveDeduction),
-          0,
-        ),
+        .reduce((s, l) => s + Number(l.netPay) - Number(l.tipShare), 0),
     );
     const cash = round2(
       Number(payments._sum.amount ?? 0) -

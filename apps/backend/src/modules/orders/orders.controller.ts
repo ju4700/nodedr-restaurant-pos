@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   ForbiddenException,
@@ -38,6 +39,10 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { BranchAccessService } from '../../common/services/branch-access.service';
 import {
+  BILL_SHARE_TTL_SECONDS,
+  BillShareService,
+} from '../bill-share/bill-share.service';
+import {
   buildKotTestSlip,
   buildOpenDrawer,
   buildReceiptEscPosJob,
@@ -60,6 +65,7 @@ import {
   type BranchPrinterTarget,
 } from './printer-transport';
 import { OrdersService } from './orders.service';
+import { OrdersDuesService, type DuesStatus } from './orders-dues.service';
 import { buildKotHtml } from './kot.html';
 import { buildReceiptHtml } from './receipt.html';
 import { VerifactuService } from '../verifactu/verifactu.service';
@@ -200,6 +206,8 @@ export class OrdersController {
     private readonly branchAccess: BranchAccessService,
     private readonly kotPrint: KotPrintService,
     private readonly verifactu: VerifactuService,
+    private readonly billShare: BillShareService,
+    private readonly dues: OrdersDuesService,
   ) {}
 
   @Auth('orders.create')
@@ -227,6 +235,41 @@ export class OrdersController {
       tab,
       channel,
       type,
+    });
+  }
+
+  // Customers who owe money on open bills (unpaid or part-paid), with each bill's payment history. Declared
+  // before ':id' so "dues" is not read as an order id.
+  @Auth('customers.manage')
+  @Get('dues')
+  async listDues(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Query('status') status?: string,
+    @Query('customerId') customerId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    const when = (v?: string) => {
+      if (!v) return undefined;
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) {
+        throw new BadRequestException('Invalid date');
+      }
+      return d;
+    };
+    const allowed = ['UNPAID', 'PARTIAL', 'PAID', 'OUTSTANDING'];
+    if (status && !allowed.includes(status)) {
+      throw new BadRequestException(
+        `status must be one of ${allowed.join(', ')}`,
+      );
+    }
+    return this.dues.list(branchId, {
+      status: status as DuesStatus | undefined,
+      customerId: customerId || undefined,
+      from: when(from),
+      to: when(to),
     });
   }
 
@@ -505,6 +548,39 @@ export class OrdersController {
       },
     });
     res.type('html').send(html);
+  }
+
+  // A guest-shareable QR/link for this one bill (see PublicBillController).
+  // Body = the cashier's on-screen adjustments, authorized here and signed
+  // into the token so the guest sees the same figures.
+  @Auth('bills.print')
+  @Post(':id/bill-share')
+  @UsePipes(new ZodValidationPipe(billPreviewSchema))
+  async createBillShare(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    const adj = body as BillPreviewDto;
+    assertMayAdjust(user, adj);
+    // 404s for an order outside this branch here, not on the public route.
+    const { overrides } = await this.ordersService.getBillForPrint(
+      branchId,
+      id,
+      adj,
+    );
+    if (overrides.isProvisional) {
+      await this.ordersService.recordBillPrinted(
+        branchId,
+        id,
+        user.id,
+        'QR_SHARE',
+      );
+    }
+    const token = this.billShare.issueToken(id, branchId, adj);
+    return { token, expiresInSeconds: BILL_SHARE_TTL_SECONDS };
   }
 
   @Auth('orders.create')

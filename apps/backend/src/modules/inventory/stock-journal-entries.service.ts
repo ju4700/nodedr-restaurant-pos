@@ -251,17 +251,20 @@ export class StockJournalEntriesService {
             lines: { create: lines },
           },
         });
-        await this.audit.record({
-          userId,
-          action: 'stock_journal.create',
-          entity: 'StockJournalEntry',
-          entityId: entry.id,
-          metadata: {
-            entryNo: entry.entryNo,
-            type: dto.type,
-            lines: lines.length,
+        await this.audit.record(
+          {
+            userId,
+            action: 'stock_journal.create',
+            entity: 'StockJournalEntry',
+            entityId: entry.id,
+            metadata: {
+              entryNo: entry.entryNo,
+              type: dto.type,
+              lines: lines.length,
+            },
           },
-        });
+          tx,
+        );
         if (dto.post)
           await this.postInTx(tx, branchId, userId, entry.id, caller);
         return entry.id;
@@ -325,13 +328,16 @@ export class StockJournalEntriesService {
           lines: { create: lines },
         },
       });
-      await this.audit.record({
-        userId,
-        action: 'stock_journal.update',
-        entity: 'StockJournalEntry',
-        entityId: id,
-        metadata: { entryNo: entry.entryNo, lines: lines.length },
-      });
+      await this.audit.record(
+        {
+          userId,
+          action: 'stock_journal.update',
+          entity: 'StockJournalEntry',
+          entityId: id,
+          metadata: { entryNo: entry.entryNo, lines: lines.length },
+        },
+        tx,
+      );
     });
     return this.get(branchId, id);
   }

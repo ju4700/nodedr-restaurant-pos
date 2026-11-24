@@ -165,6 +165,21 @@ export class InventoryService {
       mergedLinesMap.entries(),
     ).map(([ingredientId, quantity]) => ({ ingredientId, quantity }));
 
+    if (deduplicatedLines.length === 0) {
+      // Emptying the recipe of a dish that is tracked by recipe would leave it
+      // deducting nothing on sale while still claiming to be tracked. Switch
+      // its tracking off first (PATCH .../tracking) if that is what is meant.
+      const item = await this.prisma.menuItem.findFirst({
+        where: { id: menuItemId, branchId },
+        select: { inventoryTracking: true },
+      });
+      if (item?.inventoryTracking === 'RECIPE') {
+        throw new BadRequestException(
+          'This dish is tracked by recipe. Add at least one ingredient, or turn recipe tracking off first.',
+        );
+      }
+    }
+
     const ingredientIds = deduplicatedLines.map((l) => l.ingredientId);
     if (ingredientIds.length > 0) {
       const count = await this.prisma.ingredient.count({
@@ -291,7 +306,9 @@ export class InventoryService {
     if (already > 0) return { skipped: [] };
 
     const plan = await this.planFor(tx, lines);
-    for (const [ingredientId, quantity] of plan.needs) {
+    for (const [ingredientId, quantity] of [...plan.needs].sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
       if (quantity <= 0) continue;
       await this.stockService.consumeStock(
         tx,
@@ -322,7 +339,9 @@ export class InventoryService {
   ): Promise<{ restored: number }> {
     const plan = await this.planFor(tx, lines);
     let restored = 0;
-    for (const [ingredientId, quantity] of plan.needs) {
+    for (const [ingredientId, quantity] of [...plan.needs].sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
       restored += await this.stockService.restoreStock(
         tx,
         branchId,

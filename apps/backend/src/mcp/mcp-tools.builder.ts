@@ -139,11 +139,11 @@ export class Args {
   }
 
   static checkMoney(key: string, v: number): number {
-    if (
-      v < 0 ||
-      v > 1_000_000 ||
-      Math.abs(Math.round(v * 100) - v * 100) > 1e-6
-    ) {
+    // Reject any value with more than two decimal places. The old tolerance
+    // let tiny over-precision (e.g. 1.000000001) through into Decimal(12,2).
+    const rounded2 = Number.isFinite(v) ? Number(v.toFixed(2)) : NaN;
+    const valid = Number.isFinite(v) && Math.abs(v - rounded2) < 1e-9;
+    if (v < 0 || v > 1_000_000 || !valid) {
       throw new Error(
         `"${key}" must be an amount from 0 to 1000000 with at most 2 decimals`,
       );
@@ -313,35 +313,66 @@ export class McpToolsBuilder {
     const tools = this.toolDefs(actor);
 
     server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-      tools: tools.map((t) => ({
-        name: t.name,
-        title: t.title,
-        description: t.description,
-        inputSchema: t.inputSchema,
-        annotations: { readOnlyHint: t.readOnly },
-      })),
+      // Don't advertise tools this key cannot call. CallTool still checks
+      // permissions, but listing them to an AI client leaks the internal
+      // tool catalog and invites calls that can only end in an error.
+      tools: tools
+        .filter(
+          (t) =>
+            !t.requiredPermission ||
+            permissionSatisfied(actor.permissions, t.requiredPermission),
+        )
+        .map((t) => ({
+          name: t.name,
+          title: t.title,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          annotations: { readOnlyHint: t.readOnly },
+        })),
     }));
 
-    server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const tool = tools.find((t) => t.name === request.params.name);
-      if (!tool)
-        return errorResult(new Error(`Unknown tool "${request.params.name}"`));
-      if (
-        tool.requiredPermission &&
-        !permissionSatisfied(actor.permissions, tool.requiredPermission)
-      ) {
-        return errorResult(
-          new Error(`Missing permission: ${tool.requiredPermission}`),
-        );
-      }
-      try {
-        return await tool.handler(new Args(request.params.arguments ?? {}));
-      } catch (err) {
-        return errorResult(err);
-      }
-    });
+    server.server.setRequestHandler(CallToolRequestSchema, (request) =>
+      this.executeAuthorized(
+        tools,
+        actor,
+        request.params.name,
+        request.params.arguments ?? {},
+      ),
+    );
 
     return server;
+  }
+
+  /** Execute through the same permission boundary used by the MCP transport. */
+  async execute(
+    actor: SessionUser,
+    name: string,
+    args: Record<string, unknown> = {},
+  ): Promise<CallToolResult> {
+    return this.executeAuthorized(this.toolDefs(actor), actor, name, args);
+  }
+
+  private async executeAuthorized(
+    tools: ToolDef[],
+    actor: SessionUser,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) return errorResult(new Error(`Unknown tool "${name}"`));
+    if (
+      tool.requiredPermission &&
+      !permissionSatisfied(actor.permissions, tool.requiredPermission)
+    ) {
+      return errorResult(
+        new Error(`Missing permission: ${tool.requiredPermission}`),
+      );
+    }
+    try {
+      return await tool.handler(new Args(args));
+    } catch (err) {
+      return errorResult(err);
+    }
   }
 
   private async assertBranch(actor: SessionUser, branchId: string) {
@@ -1928,7 +1959,7 @@ export class McpToolsBuilder {
           await this.assertBranch(actor, branchId);
           const name = args.string('name');
           const categoryName = args.optionalString('category') || 'Specialties';
-          const price = args.optionalNumber('price') || 120;
+          const price = args.optionalMoney('price') ?? 120;
           const isVeg = (args.rawArg('isVeg') as boolean) ?? true;
           const rawBomLines =
             (args.optionalArray('bomLines') as

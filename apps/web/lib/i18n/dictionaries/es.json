@@ -108,5 +108,10 @@
   "kiosk.ticket.notPaid": "NO PAGADO",
   "kiosk.ticket.payAtCounter": "Pague en caja",
   "kiosk.language": "Idioma",
-  "nav.myDeliveries": "Mis entregas"
+  "nav.myDeliveries": "Mis entregas",
+  "nav.group.sales": "Ventas",
+  "nav.group.kitchen": "Cocina y menú",
+  "nav.group.people": "Clientes y reparto",
+  "nav.group.business": "Negocio",
+  "nav.group.admin": "Gestión"
 }

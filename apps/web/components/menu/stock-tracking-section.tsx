@@ -146,6 +146,10 @@ function TrackingForm({
           ingredientId,
           quantity,
         }));
+        if (clean.length === 0) {
+          toast.error("Add at least one ingredient with a quantity before saving a recipe.");
+          return false;
+        }
         await setRecipe.mutateAsync(clean);
         await setTracking.mutateAsync({ inventoryTracking: "RECIPE" });
       } else if (mode === "DIRECT") {

@@ -56,13 +56,15 @@ jobs:
       - name: Backend e2e tests (every opt-in flag on)
         working-directory: apps/backend
         run: |
-          for f in $(grep -rhoE 'process\.env\.[A-Z_]+_E2E' test src | sed 's/process.env.//' | sort -u); do export "$f=1"; done
+          for f in $(grep -rhoE 'process\.env\.[A-Z0-9_]+_E2E' test src | sed 's/process.env.//' | sort -u); do export "$f=1"; done
           export JWT_SECRET="$(openssl rand -hex 32)"
           pnpm exec jest --config ./test/jest-e2e.json --runInBand --forceExit --testTimeout=60000
       - name: Backend build + runtime dependency check
         run: |
           pnpm --filter backend build
           node apps/backend/scripts/check-runtime-deps.cjs
+      - name: Web unit tests
+        run: pnpm --filter ./apps/web test
       - name: Web build
         run: pnpm --filter ./apps/web build
 
@@ -74,3 +76,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: node --test mobile/www/pos/lib/*.test.mjs updater/*.test.mjs
+      # Real-IndexedDB regressions (numbering counters, retry-safe stock, backups) run in the runner's Chrome.
+      - name: Real IndexedDB tests (headless Chrome)
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw" && npm init -y >/dev/null && npm i --no-audit --no-fund playwright-core@1.49.1 >/dev/null
+          cd "$GITHUB_WORKSPACE"
+          export NODE_PATH="$RUNNER_TEMP/pw/node_modules" CHROME="$(command -v google-chrome || command -v chromium-browser || command -v chromium)"
+          node mobile/test/idb-counters.chrome.cjs
+          node mobile/test/stock-and-backup.chrome.cjs

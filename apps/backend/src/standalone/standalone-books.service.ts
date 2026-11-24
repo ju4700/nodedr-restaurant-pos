@@ -1,4 +1,9 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { round2 } from '../common/money';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { SessionUser } from '@nodedr-restaurant/types';
 import { PrismaService } from '../prisma/prisma.service';
@@ -11,7 +16,6 @@ import type {
 } from './standalone.schema';
 
 const dayStart = (d: string) => new Date(`${d}T00:00:00.000Z`);
-const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const isUniqueClash = (e: unknown) =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
 
@@ -78,6 +82,20 @@ export class StandaloneBooksService {
       select: { id: true },
     });
     if (done) return { status: 'duplicate', expenseId: done.id };
+    if (dto.paidFromCash) {
+      const closed = await this.prisma.cashClosing.findUnique({
+        where: {
+          branchId_businessDate: {
+            branchId,
+            businessDate: dayStart(dto.spentOn),
+          },
+        },
+      });
+      if (closed)
+        throw new BadRequestException(
+          'That day is already closed - the cash count includes its expenses',
+        );
+    }
     try {
       const e = await this.prisma.expense.create({
         data: {

@@ -37,7 +37,7 @@ export const menuItemSchema = z.object({
   name: z.string().min(1),
   sku: z.string().optional(),
   description: z.string().optional(),
-  imageUrl: z.string().optional(),
+  imageUrl: z.string().nullable().optional(),
   price: z.coerce.number().nonnegative(),
   // Set to enable the Half / Full / Custom portion picker; `price` is the full portion.
   halfPrice: z.number().nonnegative().nullable().optional(),

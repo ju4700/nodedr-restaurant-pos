@@ -29,6 +29,11 @@ export interface ProposalData {
   bomLines?: ProposalIngredient[];
   deleteItems?: string[];
   parameters?: Record<string, unknown>;
+  actions?: Array<{
+    toolName?: string;
+    command?: string;
+    parameters?: Record<string, unknown>;
+  }>;
 }
 
 export interface ApprovalReviewDeckProps {
